@@ -99,7 +99,7 @@ namespace AspNetCore_netcoreapp3._1_TestApp
             return new DefaultTusConfiguration
             {
                 UrlPath = "/files",
-                Store = new TusDiskStore(@"C:\tusfiles\"),
+                Store = new TusDiskStore(@"C:\tusfiles\", true, new TusDiskBufferSize(5242880)),
                 MetadataParsingStrategy = MetadataParsingStrategy.AllowEmptyValues,
                 Events = new Events
                 {

@@ -65,8 +65,24 @@ namespace tusdotnet.IntentHandlers
         {
             await WriteUploadLengthIfDefered();
 
-            var guardedStream = new ClientDisconnectGuardedReadOnlyStream(Request.Body, CancellationTokenSource.CreateLinkedTokenSource(CancellationToken));
-            var bytesWritten = await Store.AppendDataAsync(Request.FileId, guardedStream, guardedStream.CancellationToken);
+            ClientDisconnectGuardedReadOnlyStream guardedStream = null;
+            long bytesWritten;
+
+#if pipelines
+
+            if (Store is ITusPipelineStore pipelineStore)
+            {
+                bytesWritten = await pipelineStore.AppendDataAsync(Request.FileId, Request.BodyReader, CancellationToken);
+            }
+            else
+            {
+                guardedStream = new ClientDisconnectGuardedReadOnlyStream(Request.Body, CancellationTokenSource.CreateLinkedTokenSource(CancellationToken));
+                bytesWritten = await Store.AppendDataAsync(Request.FileId, guardedStream, guardedStream.CancellationToken);
+            }
+#else
+            guardedStream = new ClientDisconnectGuardedReadOnlyStream(Request.Body, CancellationTokenSource.CreateLinkedTokenSource(CancellationToken));
+            bytesWritten = await Store.AppendDataAsync(Request.FileId, guardedStream, guardedStream.CancellationToken);
+#endif
 
             var expires = _expirationHelper.IsSlidingExpiration
                 ? await _expirationHelper.SetExpirationIfSupported(Request.FileId, CancellationToken)

@@ -2,6 +2,9 @@
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
+#if pipelines
+using System.IO.Pipelines;
+#endif
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,7 +20,11 @@ namespace tusdotnet.Stores
     /// The built in data store that save files on disk.
     /// </summary>
     public class TusDiskStore :
+#if pipelines
+        ITusPipelineStore,
+#else
         ITusStore,
+#endif
         ITusCreationStore,
         ITusReadableStore,
         ITusTerminationStore,
@@ -172,6 +179,86 @@ namespace tusdotnet.Stores
                 _bufferPool.Return(fileWriteBuffer);
             }
         }
+
+#if pipelines
+
+        /// <inheritdoc/>
+        public async Task<long> AppendDataAsync(string fileId, PipeReader reader, CancellationToken cancellationToken)
+        {
+            var internalFileId = await InternalFileId.Parse(_fileIdProvider, fileId);
+
+            var fileUploadLengthProvidedDuringCreate = await GetUploadLengthAsync(fileId, cancellationToken);
+            using var diskFileStream = _fileRepFactory.Data(internalFileId).GetStream(FileMode.Append, FileAccess.Write, FileShare.None);
+
+            var originalDiskFileLength = diskFileStream.Length;
+            if (fileUploadLengthProvidedDuringCreate == originalDiskFileLength)
+            {
+                return 0;
+            }
+
+            var chunkCompleteFile = InitializeChunk(internalFileId, originalDiskFileLength);
+
+            var bytesWrittenThisRequest = 0L;
+            long numberOfBytesReadFromClient;
+            ReadResult result = default;
+
+            while (!cancellationToken.IsCancellationRequested && !result.IsCanceled && !result.IsCompleted)
+            {
+                result = await reader.ReadAsync(cancellationToken);
+
+                numberOfBytesReadFromClient = GetResultLength(result.Buffer);
+
+                AssertNotToMuchData(originalDiskFileLength, numberOfBytesReadFromClient, fileUploadLengthProvidedDuringCreate);
+
+                if (numberOfBytesReadFromClient > _maxWriteBufferSize)
+                {
+                    await FlushToDisk(result.Buffer, diskFileStream);
+                    bytesWrittenThisRequest += numberOfBytesReadFromClient;
+                    reader.AdvanceTo(result.Buffer.End);
+                }
+                else
+                {
+                    reader.AdvanceTo(result.Buffer.Start, result.Buffer.End);
+                }
+            }
+
+            bytesWrittenThisRequest += GetResultLength(result.Buffer);
+            await FlushToDisk(result.Buffer, diskFileStream);
+
+            await reader.CompleteAsync();
+
+            if (!result.IsCanceled)
+            {
+                MarkChunkComplete(chunkCompleteFile);
+            }
+
+            return bytesWrittenThisRequest;
+        }
+
+        private long GetResultLength(ReadOnlySequence<byte> buffer)
+        {
+            return new SequenceReader<byte>(buffer).Length;
+        }
+
+        private void AssertNotToMuchData(long originalDiskFileLength, long numberOfBytesReadFromClient, long? fileUploadLengthProvidedDuringCreate)
+        {
+            var newDiskFileLength = originalDiskFileLength + numberOfBytesReadFromClient;
+
+            if (newDiskFileLength > fileUploadLengthProvidedDuringCreate)
+            {
+                throw new TusStoreException($"Stream contains more data than the file's upload length. Stream data: {newDiskFileLength}, upload length: {fileUploadLengthProvidedDuringCreate}.");
+            }
+        }
+
+        private async Task FlushToDisk(ReadOnlySequence<byte> buffer, FileStream stream)
+        {
+            foreach (var segment in buffer)
+            {
+                await stream.WriteAsync(segment);
+            }
+        }
+
+#endif
 
         /// <inheritdoc />
         public async Task<bool> FileExistAsync(string fileId, CancellationToken _)
